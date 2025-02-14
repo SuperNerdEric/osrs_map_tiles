@@ -1,38 +1,39 @@
 FROM python:3.10
 
-# Install miniconda
+# Install system packages
+RUN apt-get update && apt-get install -y \
+    wget \
+    git \
+    openjdk-17-jdk \
+    maven \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install miniconda (you may need ca-certificates, too)
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
 RUN chmod +x Miniconda3-latest-Linux-x86_64.sh
 RUN ./Miniconda3-latest-Linux-x86_64.sh -b -p /usr/local/bin/miniconda3
-RUN ls /usr/local/bin/miniconda3/bin
 ENV PATH="/usr/local/bin/miniconda3/bin:${PATH}"
 
 # Create a conda env
 RUN conda create --name vips python=3.7
 
-# Update all future "RUN" commands to use the conda env
+# Update shell
 SHELL ["conda", "run", "--no-capture-output", "-n", "vips", "/bin/bash", "-c"]
 
-# Install vips
+# Install pyvips in environment
 RUN conda install --channel conda-forge pyvips
 
-# Install python dependencies
+# Copy & install Python dependencies
 COPY requirements.txt requirements.txt
 RUN pip install -r requirements.txt
-RUN pip3 install pyvips
 
-# Install Java 11
-RUN conda install -c conda-forge openjdk=11
+# (Optional) if you really need it: conda install -c conda-forge openjdk=11
+# but we already installed system JDK
 
-# Install Maven
-RUN conda install -c conda-forge maven
-
-# Clone runelite repo
+# Clone runelite
 RUN git clone https://github.com/runelite/runelite.git /runelite
-# Install runelite
 RUN mvn -f /runelite/pom.xml install -DskipTests
 
-# Add required files
 ADD src src
-
 CMD [ "conda", "run", "--no-capture-output", "-n", "vips", "python", "./src/tile_generator.py" ]
