@@ -2,7 +2,7 @@ name: Generate OSRS Map Tiles
 
 on:
   schedule:
-    - cron: '0 4 * * *' # 4:00 UTC daily
+    - cron: '0 0,3,6,9,12,15,18,21 * * *' # Every 3 hours starting at 00:00 UTC
   workflow_dispatch:
 
 jobs:
