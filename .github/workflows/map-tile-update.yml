@@ -1,0 +1,44 @@
+name: Generate OSRS Map Tiles
+
+on:
+  schedule:
+    - cron: '0 4 * * *' # 4:00 UTC daily
+  workflow_dispatch:
+
+jobs:
+  generate-tiles:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker
+        uses: docker/setup-buildx-action@v3
+
+      - name: Run tile generator in Docker
+        run: |
+          export DOCKER_BUILDKIT=0
+          docker build ./tile_generator -t map-tile-generator
+          docker run -v "${{ github.workspace }}:/repo" map-tile-generator
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Commit changes
+        run: |
+          git add .
+          git diff-index --quiet HEAD || git commit -m "Automated tile generation $(date -u +'%Y-%m-%d %H:%M:%S')"
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: auto/map-tile-update
+          title: "Automated Tile Update"
+          commit-message: "Update map tiles"
+          body: "This PR contains automatically generated tile updates."
+          delete-branch: true
