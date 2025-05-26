@@ -46,7 +46,7 @@ jobs:
       - name: Create disk usage report
         if: always()
         run: |
-          du -h -d 4 / > disk-usage.txt || true
+          du -BM -d 4 / 2>/dev/null | awk '$1+0 >= 1' | sort -nr > disk-usage.txt || true
         continue-on-error: true
 
       - name: Upload disk usage report artifact
