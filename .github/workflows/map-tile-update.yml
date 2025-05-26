@@ -42,3 +42,15 @@ jobs:
           commit-message: "Update map tiles"
           body: "This PR contains automatically generated tile updates."
           delete-branch: true
+
+      - name: Save disk usage report
+        run: |
+          du -h -d 4 / > disk-usage.txt || true
+        continue-on-error: true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: disk-usage
+          path: disk-usage.txt
+
