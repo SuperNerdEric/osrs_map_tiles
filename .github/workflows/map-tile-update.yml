@@ -43,12 +43,14 @@ jobs:
           body: "This PR contains automatically generated tile updates."
           delete-branch: true
 
-      - name: Save disk usage report
+      - name: Create disk usage report
+        if: always()
         run: |
           du -h -d 4 / > disk-usage.txt || true
         continue-on-error: true
 
-      - name: Upload artifact
+      - name: Upload disk usage report artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: disk-usage
