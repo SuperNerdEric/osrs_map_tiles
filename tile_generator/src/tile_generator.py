@@ -3,6 +3,7 @@ Tile generator for creating tile sets for OSRS maps to be used with map viewers 
 """
 
 import glob
+import gc
 import json
 import logging
 import math
@@ -41,6 +42,9 @@ MAX_ZOOM = 11
 MIN_Z = 0
 MAX_Z = 3
 
+# Limit thread pool size to reduce memory usage
+MAX_WORKERS = 4
+
 REPO_DIR = '/repo' # Name of the directory mounted on the local machine
 ROOT_CACHE_DIR = os.path.join(REPO_DIR, 'cache/')
 GENERATED_FULL_IMAGES = os.path.join(REPO_DIR, 'generated_images/')
@@ -76,6 +80,8 @@ def main():
     LOG.info("Generating tiles")
     for plane in range(MAX_Z + 1):
         generate_tiles_for_plane(plane)
+        # Force garbage collection between planes
+        gc.collect()
 
     for plane in range(MIN_Z, MAX_Z + 1):
         previous_map_image_name = os.path.join(GENERATED_FULL_IMAGES, f"previous-map-image-{plane}.png")
@@ -269,13 +275,14 @@ def generate_tiles_for_plane(plane):
     log_prefix = f"[Plane: {plane}]:"
 
     LOG.info(f"{log_prefix} Generating plane {plane}")
-    LOG.info(f"{log_prefix} Loading images into memory")
+    LOG.info(f"{log_prefix} Loading images (sequential access to reduce memory)")
 
     old_image_location = os.path.join(GENERATED_FULL_IMAGES, f"current-map-image-{plane}.png")
     new_image_location = os.path.join(GENERATED_FULL_IMAGES, f"new-map-image-{plane}.png")
 
-    old_image = pyvips.Image.new_from_file(old_image_location)
-    new_image = pyvips.Image.new_from_file(new_image_location)
+    # Use sequential access to avoid loading entire images into memory
+    old_image = pyvips.Image.new_from_file(old_image_location, access="sequential")
+    new_image = pyvips.Image.new_from_file(new_image_location, access="sequential")
 
     image_width = new_image.width
     image_width_tiles = int(image_width / TILE_SIZE_PX)
@@ -285,25 +292,52 @@ def generate_tiles_for_plane(plane):
     LOG.info(f"{log_prefix} Calculating changed tiles")
     changed_tiles = get_changed_tiles(old_image, new_image, plane, starting_zoom)
 
-    LOG.info(f"{log_prefix} Storing diff image")
-    output_tile_diff_image(changed_tiles, new_image_location,  str(Path(GENERATED_FULL_IMAGES, f"diff-map-image-{plane}.png")))
-
     LOG.info(f"{log_prefix} Found {len(changed_tiles)} changed tiles at zoom level {starting_zoom}")
 
     LOG.info(f"{log_prefix} Saving changed tiles at zoom level {starting_zoom}")
+    # Save tiles immediately and don't keep images in memory
+    tile_coords = []
     for tile in changed_tiles:
         save_tile(tile["image"], plane, starting_zoom, tile["x"], tile["y"])
+        # Store only coordinates, not image data
+        tile_coords.append({
+            "pixel_x": tile["pixel_x"],
+            "pixel_y": tile["pixel_y"],
+            "x": tile["x"],
+            "y": tile["y"]
+        })
+        # Explicitly delete image reference
+        del tile["image"]
+    
+    # Free memory
+    del changed_tiles
+    gc.collect()
 
-    next_changed_tiles = changed_tiles
+    LOG.info(f"{log_prefix} Storing diff image")
+    output_tile_diff_image(tile_coords, new_image_location,  str(Path(GENERATED_FULL_IMAGES, f"diff-map-image-{plane}.png")))
+
+    # Reload tiles as needed for splitting (but process in batches)
+    next_changed_tiles = [{"x": t["x"], "y": t["y"]} for t in tile_coords]
     for zoom in range(starting_zoom + 1, MAX_ZOOM + 1):
         LOG.info(f"{log_prefix} Splitting changed tiles from zoom level {zoom-1} to zoom level {zoom}")
         next_changed_tiles = split_tiles_to_new_zoom(next_changed_tiles, plane, zoom)
         LOG.info(f"{log_prefix} Done")
+        # Force garbage collection between zoom levels
+        gc.collect()
 
+    # For joining, we need to start with the tiles at starting_zoom
+    join_changed_tiles = [{"x": t["x"], "y": t["y"]} for t in tile_coords]
     for zoom in reversed(range(MIN_ZOOM + 1, starting_zoom + 1)):
         LOG.info(f"{log_prefix} Joining changed tiles from zoom level {zoom} to zoom level {zoom - 1}")
-        changed_tiles = join_tiles_to_new_zoom(changed_tiles, plane, zoom, zoom - 1)
+        join_changed_tiles = join_tiles_to_new_zoom(join_changed_tiles, plane, zoom, zoom - 1)
         LOG.info(f"{log_prefix} Done")
+        # Force garbage collection between zoom levels
+        gc.collect()
+    
+    # Clean up large image references
+    del old_image
+    del new_image
+    gc.collect()
 
 
 def get_changed_tiles(old_image, new_image, plane, zoom):
@@ -311,13 +345,22 @@ def get_changed_tiles(old_image, new_image, plane, zoom):
     new_image_height_px = new_image.height
 
     changed_tiles = []
+    
+    # Process in batches to avoid accumulating too many futures in memory
+    BATCH_SIZE = 1000
+    tile_positions = []
+    for tile_x in range(0, new_image_width_px, TILE_SIZE_PX):
+        for tile_y in range(0, new_image_height_px, TILE_SIZE_PX):
+            tile_positions.append((tile_x, tile_y))
 
-    with thread_pool_executor() as executor:
-        futures = []
-
-        # Loop over all tiles in the new image
-        for tile_x in range(0, new_image_width_px, TILE_SIZE_PX):
-            for tile_y in range(0, new_image_height_px, TILE_SIZE_PX):
+    # Process in batches
+    for batch_start in range(0, len(tile_positions), BATCH_SIZE):
+        batch = tile_positions[batch_start:batch_start + BATCH_SIZE]
+        
+        with thread_pool_executor() as executor:
+            futures = []
+            
+            for tile_x, tile_y in batch:
                 futures.append(
                     executor.submit(
                         has_tile_changed,
@@ -330,22 +373,25 @@ def get_changed_tiles(old_image, new_image, plane, zoom):
                     )
                 )
 
-        for future in concurrent.futures.as_completed(futures):
-            ((tile_x, tile_y), new_image_tile, has_changed) = future.result()
+            for future in concurrent.futures.as_completed(futures):
+                ((tile_x, tile_y), new_image_tile, has_changed) = future.result()
 
-            if has_changed:
-                x = int(tile_x / TILE_SIZE_PX)
-                y = int(tile_y / TILE_SIZE_PX)
-                max_y = math.floor(new_image.height / TILE_SIZE_PX)
-                y = max_y - y - 1
+                if has_changed:
+                    x = int(tile_x / TILE_SIZE_PX)
+                    y = int(tile_y / TILE_SIZE_PX)
+                    max_y = math.floor(new_image.height / TILE_SIZE_PX)
+                    y = max_y - y - 1
 
-                changed_tiles.append({
-                    "pixel_x": tile_x,
-                    "pixel_y": tile_y,
-                    "x": x,
-                    "y": y,
-                    "image": new_image_tile
-                })
+                    changed_tiles.append({
+                        "pixel_x": tile_x,
+                        "pixel_y": tile_y,
+                        "x": x,
+                        "y": y,
+                        "image": new_image_tile
+                    })
+        
+        # Force garbage collection between batches
+        gc.collect()
 
     return changed_tiles
 
@@ -370,7 +416,12 @@ def has_tile_changed(plane, zoom, tile_x, tile_y, old_image, new_image):
                             dtype=np.uint8,
                             shape=[new_image_tile.height, new_image_tile.width, new_image_tile.bands])
 
-    ssim = structural_similarity(old_image_np, new_image_np, multichannel=True)
+    # Use channel_axis instead of multichannel for newer scikit-image versions
+    try:
+        ssim = structural_similarity(old_image_np, new_image_np, channel_axis=2)
+    except TypeError:
+        # Fallback for older versions
+        ssim = structural_similarity(old_image_np, new_image_np, multichannel=True)
 
     has_changed = ssim < 0.999
 
@@ -379,22 +430,35 @@ def has_tile_changed(plane, zoom, tile_x, tile_y, old_image, new_image):
 
 def split_tiles_to_new_zoom(changed_tiles, plane, new_zoom):
     new_changed_tiles = []
+    
+    # Process in batches to reduce memory usage
+    BATCH_SIZE = 500
+    
+    for batch_start in range(0, len(changed_tiles), BATCH_SIZE):
+        batch = changed_tiles[batch_start:batch_start + BATCH_SIZE]
+        
+        with thread_pool_executor() as executor:
+            futures = []
 
-    with thread_pool_executor() as executor:
-        futures = []
-
-        for changed_tile in changed_tiles:
-            futures.append(
-                executor.submit(
-                    split_tile_to_new_zoom,
-                    changed_tile=changed_tile,
-                    plane=plane,
-                    new_zoom=new_zoom
+            for changed_tile in batch:
+                futures.append(
+                    executor.submit(
+                        split_tile_to_new_zoom,
+                        changed_tile=changed_tile,
+                        plane=plane,
+                        new_zoom=new_zoom
+                    )
                 )
-            )
 
-        for future in concurrent.futures.as_completed(futures):
-            new_changed_tiles.extend(future.result())
+            for future in concurrent.futures.as_completed(futures):
+                result = future.result()
+                # Only store coordinates, not images
+                new_changed_tiles.extend([
+                    {"x": t["x"], "y": t["y"]} for t in result
+                ])
+        
+        # Force garbage collection between batches
+        gc.collect()
 
     return new_changed_tiles
 
@@ -403,7 +467,11 @@ def split_tile_to_new_zoom(changed_tile, plane, new_zoom):
     original_x = changed_tile["x"]
     original_y = changed_tile["y"]
 
-    tile_image = changed_tile["image"]
+    # Load tile from disk if we only have coordinates
+    if "image" not in changed_tile:
+        tile_image = load_generated_tile(plane, new_zoom - 1, original_x, original_y)
+    else:
+        tile_image = changed_tile["image"]
 
     tile_image_resized = tile_image.resize(2, kernel='nearest')
 
@@ -412,60 +480,63 @@ def split_tile_to_new_zoom(changed_tile, plane, new_zoom):
 
     tile_image_0 = tile_image_resized.crop(0, TILE_SIZE_PX, TILE_SIZE_PX, TILE_SIZE_PX)
     save_tile(tile_image_0, plane, new_zoom, new_x, new_y)
+    del tile_image_0
 
     tile_image_1 = tile_image_resized.crop(TILE_SIZE_PX, TILE_SIZE_PX, TILE_SIZE_PX, TILE_SIZE_PX)
     save_tile(tile_image_1, plane, new_zoom, new_x + 1, new_y)
+    del tile_image_1
 
     tile_image_2 = tile_image_resized.crop(0, 0, TILE_SIZE_PX, TILE_SIZE_PX)
     save_tile(tile_image_2, plane, new_zoom, new_x, new_y + 1)
+    del tile_image_2
 
     tile_image_3 = tile_image_resized.crop(TILE_SIZE_PX, 0, TILE_SIZE_PX, TILE_SIZE_PX)
     save_tile(tile_image_3, plane, new_zoom, new_x + 1, new_y + 1)
+    del tile_image_3
+    
+    # Clean up - always delete since we're done with the image
+    del tile_image_resized
+    del tile_image
 
-    # New tiles at new zoom
+    # Return only coordinates, not images
     return [
-        {
-            "x": new_x,
-            "y": new_y,
-            "image": tile_image_0
-        },
-        {
-            "x": new_x + 1,
-            "y": new_y,
-            "image": tile_image_1
-        },
-        {
-            "x": new_x,
-            "y": new_y + 1,
-            "image": tile_image_2
-        },
-        {
-            "x": new_x + 1,
-            "y": new_y + 1,
-            "image": tile_image_3
-        }
+        {"x": new_x, "y": new_y},
+        {"x": new_x + 1, "y": new_y},
+        {"x": new_x, "y": new_y + 1},
+        {"x": new_x + 1, "y": new_y + 1}
     ]
 
 
 def join_tiles_to_new_zoom(changed_tiles, plane, current_zoom, new_zoom):
     new_changed_tiles = []
+    
+    # Process in batches to reduce memory usage
+    BATCH_SIZE = 500
+    
+    for batch_start in range(0, len(changed_tiles), BATCH_SIZE):
+        batch = changed_tiles[batch_start:batch_start + BATCH_SIZE]
+        
+        with thread_pool_executor() as executor:
+            futures = []
 
-    with thread_pool_executor() as executor:
-        futures = []
-
-        for changed_tile in changed_tiles:
-            futures.append(
-                executor.submit(
-                    join_changed_tile_to_new_zoom,
-                    changed_tile=changed_tile,
-                    plane=plane,
-                    current_zoom=current_zoom,
-                    new_zoom=new_zoom
+            for changed_tile in batch:
+                futures.append(
+                    executor.submit(
+                        join_changed_tile_to_new_zoom,
+                        changed_tile=changed_tile,
+                        plane=plane,
+                        current_zoom=current_zoom,
+                        new_zoom=new_zoom
+                    )
                 )
-            )
 
-        for future in concurrent.futures.as_completed(futures):
-            new_changed_tiles.append(future.result())
+            for future in concurrent.futures.as_completed(futures):
+                result = future.result()
+                # Only store coordinates, not images
+                new_changed_tiles.append({"x": result["x"], "y": result["y"]})
+        
+        # Force garbage collection between batches
+        gc.collect()
 
     return new_changed_tiles
 
@@ -519,11 +590,15 @@ def join_changed_tile_to_new_zoom(changed_tile, plane, current_zoom, new_zoom):
     new_y = math.floor(original_y / 2)
 
     save_tile(new_tile_image_resized, plane, new_zoom, new_x, new_y)
+    
+    # Clean up image references
+    del new_tile_image
+    del new_tile_image_resized
+    del tiles
 
     return {
         "x": new_x,
-        "y": new_y,
-        "image": new_tile_image_resized
+        "y": new_y
     }
 
 def save_tile(tile_image, plane, zoom, x, y):
@@ -562,21 +637,26 @@ def generated_tile_path(plane, zoom, x, y):
 
 
 def output_tile_diff_image(changed_tiles, new_image_location, output_file_name):
-    diff_image = im = Image.open(new_image_location)
-
-    draw = ImageDraw.Draw(im)
+    # Only create diff image if we have tile coordinates
+    if not changed_tiles:
+        return
+    
+    diff_image = Image.open(new_image_location)
+    draw = ImageDraw.Draw(diff_image)
 
     for tile in changed_tiles:
         shape = [(tile["pixel_x"], tile["pixel_y"]), (tile["pixel_x"] + TILE_SIZE_PX, tile["pixel_y"] + TILE_SIZE_PX)]
         draw.rectangle(shape, fill=None, outline="red", width=3)
 
     diff_image.save(output_file_name)
+    del diff_image
+    del draw
 
 
 @contextmanager
-# Default to 4 workers, to avoid running out of memory
-def thread_pool_executor(max_workers=4):
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+def thread_pool_executor():
+    # Limit workers to reduce memory usage
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         try:
             yield executor
         except KeyboardInterrupt:
