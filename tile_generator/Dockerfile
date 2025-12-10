@@ -15,6 +15,10 @@ RUN chmod +x Miniconda3-latest-Linux-x86_64.sh
 RUN ./Miniconda3-latest-Linux-x86_64.sh -b -p /usr/local/bin/miniconda3
 ENV PATH="/usr/local/bin/miniconda3/bin:${PATH}"
 
+# Accept Terms of Service for required channels
+RUN conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main \
+    && conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+    
 # Create a conda env
 RUN conda create --name vips python=3.7
 
