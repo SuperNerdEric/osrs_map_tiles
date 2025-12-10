@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import zipfile
 from datetime import datetime
 from enum import Enum
@@ -42,8 +43,11 @@ MAX_ZOOM = 11
 MIN_Z = 0
 MAX_Z = 3
 
-# Limit thread pool size to reduce memory usage
-MAX_WORKERS = 4
+# Limit thread pool size to reduce memory usage and avoid VIPS concurrency issues
+MAX_WORKERS = 2
+
+# Lock for serializing file writes to avoid concurrent write issues
+file_write_lock = threading.Lock()
 
 REPO_DIR = '/repo' # Name of the directory mounted on the local machine
 ROOT_CACHE_DIR = os.path.join(REPO_DIR, 'cache/')
@@ -448,31 +452,23 @@ def has_tile_changed(plane, zoom, tile_x, tile_y, old_image, new_image):
 def split_tiles_to_new_zoom(changed_tiles, plane, new_zoom):
     new_changed_tiles = []
     
-    # Process in batches to reduce memory usage
-    BATCH_SIZE = 500
+    # Process in smaller batches and more sequentially to avoid VIPS concurrency issues
+    BATCH_SIZE = 100
     
     for batch_start in range(0, len(changed_tiles), BATCH_SIZE):
         batch = changed_tiles[batch_start:batch_start + BATCH_SIZE]
         
-        with thread_pool_executor() as executor:
-            futures = []
-
-            for changed_tile in batch:
-                futures.append(
-                    executor.submit(
-                        split_tile_to_new_zoom,
-                        changed_tile=changed_tile,
-                        plane=plane,
-                        new_zoom=new_zoom
-                    )
-                )
-
-            for future in concurrent.futures.as_completed(futures):
-                result = future.result()
+        # Process sequentially to avoid VIPS concurrent access issues
+        for changed_tile in batch:
+            try:
+                result = split_tile_to_new_zoom(changed_tile, plane, new_zoom)
                 # Only store coordinates, not images
                 new_changed_tiles.extend([
                     {"x": t["x"], "y": t["y"]} for t in result
                 ])
+            except Exception as e:
+                LOG.warning(f"Error splitting tile {changed_tile.get('x', '?')},{changed_tile.get('y', '?')}: {e}")
+                continue
         
         # Force garbage collection between batches
         gc.collect()
@@ -527,30 +523,21 @@ def split_tile_to_new_zoom(changed_tile, plane, new_zoom):
 def join_tiles_to_new_zoom(changed_tiles, plane, current_zoom, new_zoom):
     new_changed_tiles = []
     
-    # Process in batches to reduce memory usage
-    BATCH_SIZE = 500
+    # Process in smaller batches and more sequentially to avoid VIPS concurrency issues
+    BATCH_SIZE = 100
     
     for batch_start in range(0, len(changed_tiles), BATCH_SIZE):
         batch = changed_tiles[batch_start:batch_start + BATCH_SIZE]
         
-        with thread_pool_executor() as executor:
-            futures = []
-
-            for changed_tile in batch:
-                futures.append(
-                    executor.submit(
-                        join_changed_tile_to_new_zoom,
-                        changed_tile=changed_tile,
-                        plane=plane,
-                        current_zoom=current_zoom,
-                        new_zoom=new_zoom
-                    )
-                )
-
-            for future in concurrent.futures.as_completed(futures):
-                result = future.result()
+        # Process sequentially to avoid VIPS concurrent access issues
+        for changed_tile in batch:
+            try:
+                result = join_changed_tile_to_new_zoom(changed_tile, plane, current_zoom, new_zoom)
                 # Only store coordinates, not images
                 new_changed_tiles.append({"x": result["x"], "y": result["y"]})
+            except Exception as e:
+                LOG.warning(f"Error joining tile {changed_tile.get('x', '?')},{changed_tile.get('y', '?')}: {e}")
+                continue
         
         # Force garbage collection between batches
         gc.collect()
@@ -625,7 +612,17 @@ def save_tile(tile_image, plane, zoom, x, y):
 
     file_path = Path(file_dir, str(y) + ".png")
 
-    tile_image.pngsave(str(file_path), compression=9)
+    # Serialize file writes to avoid concurrent write issues
+    with file_write_lock:
+        try:
+            # Write to memory first, then to disk to avoid VIPS issues
+            tile_data = tile_image.write_to_buffer('.png[compression=9]')
+            with open(file_path, 'wb') as f:
+                f.write(tile_data)
+        except Exception as e:
+            # Fallback to direct pngsave if buffer write fails
+            LOG.warning(f"Buffer write failed for {file_path}, trying direct save: {e}")
+            tile_image.pngsave(str(file_path), compression=9)
 
 
 def load_generated_tile(plane, zoom, x, y):
