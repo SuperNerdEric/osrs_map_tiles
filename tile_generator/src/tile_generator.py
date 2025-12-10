@@ -574,8 +574,9 @@ def output_tile_diff_image(changed_tiles, new_image_location, output_file_name):
 
 
 @contextmanager
-def thread_pool_executor():
-    with ThreadPoolExecutor() as executor:
+# Default to 4 workers, to avoid running out of memory
+def thread_pool_executor(max_workers=4):
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         try:
             yield executor
         except KeyboardInterrupt:
