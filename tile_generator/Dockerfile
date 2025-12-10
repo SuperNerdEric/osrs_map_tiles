@@ -1,11 +1,10 @@
-FROM python:3.10
+FROM python:3.10-bookworm
 
 # Install system packages
-# Install OpenJDK 17 from Adoptium (Eclipse Temurin) openjdk-17-jdk
 RUN apt-get update && apt-get install -y \
     wget \
     git \
-    temurin-17-jdk \
+    openjdk-17-jdk \
     maven \
     && rm -rf /var/lib/apt/lists/*
 
