@@ -275,14 +275,15 @@ def generate_tiles_for_plane(plane):
     log_prefix = f"[Plane: {plane}]:"
 
     LOG.info(f"{log_prefix} Generating plane {plane}")
-    LOG.info(f"{log_prefix} Loading images (sequential access to reduce memory)")
+    LOG.info(f"{log_prefix} Loading images (random access mode for concurrent tile processing)")
 
     old_image_location = os.path.join(GENERATED_FULL_IMAGES, f"current-map-image-{plane}.png")
     new_image_location = os.path.join(GENERATED_FULL_IMAGES, f"new-map-image-{plane}.png")
 
-    # Use sequential access to avoid loading entire images into memory
-    old_image = pyvips.Image.new_from_file(old_image_location, access="sequential")
-    new_image = pyvips.Image.new_from_file(new_image_location, access="sequential")
+    # Use random access to allow concurrent random tile cropping while still being memory-efficient
+    # pyvips will use disk caching and won't load the entire image into memory
+    old_image = pyvips.Image.new_from_file(old_image_location, access="random")
+    new_image = pyvips.Image.new_from_file(new_image_location, access="random")
 
     image_width = new_image.width
     image_width_tiles = int(image_width / TILE_SIZE_PX)
