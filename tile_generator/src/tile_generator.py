@@ -417,12 +417,28 @@ def has_tile_changed(plane, zoom, tile_x, tile_y, old_image, new_image):
                             dtype=np.uint8,
                             shape=[new_image_tile.height, new_image_tile.width, new_image_tile.bands])
 
-    # Use channel_axis instead of multichannel for newer scikit-image versions
+    # Calculate appropriate window size (must be odd and smaller than image dimensions)
+    min_dim = min(old_image_tile.height, old_image_tile.width, new_image_tile.height, new_image_tile.width)
+    win_size = min(7, min_dim if min_dim % 2 == 1 else min_dim - 1)
+    if win_size < 3:
+        win_size = 3
+
+    # Use multichannel parameter for scikit-image
+    # Try older API first (multichannel=True) as it's more widely supported
     try:
-        ssim = structural_similarity(old_image_np, new_image_np, channel_axis=2)
-    except TypeError:
-        # Fallback for older versions
-        ssim = structural_similarity(old_image_np, new_image_np, multichannel=True)
+        # Older versions use multichannel
+        ssim = structural_similarity(old_image_np, new_image_np, multichannel=True, win_size=win_size)
+    except (TypeError, ValueError) as e:
+        try:
+            # Newer versions use channel_axis
+            ssim = structural_similarity(old_image_np, new_image_np, channel_axis=2, win_size=win_size)
+        except (TypeError, ValueError):
+            # If win_size is still too large, use minimum window size
+            win_size = 3
+            try:
+                ssim = structural_similarity(old_image_np, new_image_np, multichannel=True, win_size=win_size)
+            except (TypeError, ValueError):
+                ssim = structural_similarity(old_image_np, new_image_np, channel_axis=2, win_size=win_size)
 
     has_changed = ssim < 0.999
 
