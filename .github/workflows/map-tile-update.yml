@@ -30,10 +30,13 @@ jobs:
       - name: Set up Docker
         uses: docker/setup-buildx-action@v3
 
-      - name: Run tile generator in Docker
+      - name: Build Docker image
         run: |
           export DOCKER_BUILDKIT=0
           docker build ./tile_generator -t map-tile-generator
+
+      - name: Run tile generator in Docker
+        run: |
           docker run -v "${{ github.workspace }}:/repo" map-tile-generator
 
       - name: Configure git
