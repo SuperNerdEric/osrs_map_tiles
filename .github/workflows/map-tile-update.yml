@@ -41,12 +41,15 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Pull Docker image from ghcr.io
+        id: pull
         run: |
-          docker pull ghcr.io/${{ github.repository }}/map-tile-generator:latest
+          IMAGE_LOWER=$(echo "${{ github.repository }}/map-tile-generator" | tr '[:upper:]' '[:lower:]')
+          docker pull ghcr.io/${IMAGE_LOWER}:latest
+          echo "image=ghcr.io/${IMAGE_LOWER}:latest" >> $GITHUB_OUTPUT
 
       - name: Run tile generator in Docker
         run: |
-          docker run -v "${{ github.workspace }}:/repo" ghcr.io/${{ github.repository }}/map-tile-generator:latest
+          docker run -v "${{ github.workspace }}:/repo" ${{ steps.pull.outputs.image }}
 
       - name: Configure git
         run: |
