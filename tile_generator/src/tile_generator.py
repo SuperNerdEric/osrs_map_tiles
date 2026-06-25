@@ -41,6 +41,8 @@ MAX_ZOOM = 11
 MIN_Z = 0
 MAX_Z = 3
 
+FORCE_FULL_REGEN = os.environ.get("FORCE_FULL_REGEN", "").lower() in ("1", "true", "yes")
+
 REPO_DIR = '/repo' # Name of the directory mounted on the local machine
 ROOT_CACHE_DIR = os.path.join(REPO_DIR, 'cache/')
 GENERATED_FULL_IMAGES = os.path.join(REPO_DIR, 'generated_images/')
@@ -283,8 +285,12 @@ def generate_tiles_for_plane(plane):
 
     starting_zoom = int(math.sqrt(math.pow(2, math.ceil(math.log(image_width_tiles) / math.log(2)))))
 
-    LOG.info(f"{log_prefix} Calculating changed tiles")
-    changed_tiles = get_changed_tiles(old_image, new_image, plane, starting_zoom)
+    if FORCE_FULL_REGEN:
+        LOG.info(f"{log_prefix} FORCE_FULL_REGEN enabled, regenerating all tiles")
+        changed_tiles = get_all_tiles(new_image)
+    else:
+        LOG.info(f"{log_prefix} Calculating changed tiles")
+        changed_tiles = get_changed_tiles(old_image, new_image, plane, starting_zoom)
 
     LOG.info(f"{log_prefix} Storing diff image")
     output_tile_diff_image(changed_tiles, new_image_location,  str(Path(GENERATED_FULL_IMAGES, f"diff-map-image-{plane}.png")))
@@ -347,6 +353,32 @@ def get_changed_tiles(old_image, new_image, plane, zoom):
                     "y": y,
                     "image": new_image_tile
                 })
+
+    return changed_tiles
+
+
+def get_all_tiles(new_image):
+    """
+    Extract every tile from the new map image. Used for full regeneration when
+    on-disk tiles may be corrupt but the full-map diff is unchanged.
+    """
+    changed_tiles = []
+
+    for tile_x in range(0, new_image.width, TILE_SIZE_PX):
+        for tile_y in range(0, new_image.height, TILE_SIZE_PX):
+            new_image_tile = new_image.crop(tile_x, tile_y, TILE_SIZE_PX, TILE_SIZE_PX)
+            x = int(tile_x / TILE_SIZE_PX)
+            y = int(tile_y / TILE_SIZE_PX)
+            max_y = math.floor(new_image.height / TILE_SIZE_PX)
+            y = max_y - y - 1
+
+            changed_tiles.append({
+                "pixel_x": tile_x,
+                "pixel_y": tile_y,
+                "x": x,
+                "y": y,
+                "image": new_image_tile
+            })
 
     return changed_tiles
 
