@@ -14,6 +14,11 @@ RUN wget -q "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-
     && rm "gradle-${GRADLE_VERSION}-bin.zip"
 ENV PATH="/opt/gradle-${GRADLE_VERSION}/bin:${PATH}"
 
+# Build a fat jar that pulls the latest published net.runelite:cache artifact.
+# This stays current with new object opcodes in the game cache.
+COPY java java
+RUN gradle -p java build
+
 # Install miniconda
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 RUN wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh \
@@ -33,11 +38,6 @@ RUN conda install --channel conda-forge pyvips
 
 COPY requirements.txt requirements.txt
 RUN pip install -r requirements.txt
-
-# Build a fat jar that pulls the latest published net.runelite:cache artifact.
-# This stays current with new object opcodes in the game cache.
-COPY java java
-RUN gradle -p java build
 
 ADD src src
 CMD [ "conda", "run", "--no-capture-output", "-n", "vips", "python", "./src/tile_generator.py" ]
