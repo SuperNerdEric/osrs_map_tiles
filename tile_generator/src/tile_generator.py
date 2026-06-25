@@ -3,7 +3,6 @@ Tile generator for creating tile sets for OSRS maps to be used with map viewers 
 """
 
 import glob
-import gc
 import json
 import logging
 import math
@@ -41,9 +40,6 @@ MAX_ZOOM = 11
 
 MIN_Z = 0
 MAX_Z = 3
-
-FORCE_FULL_REGEN = os.environ.get("FORCE_FULL_REGEN", "").lower() in ("1", "true", "yes")
-FULL_REGEN_BATCH_SIZE = int(os.environ.get("FULL_REGEN_BATCH_SIZE", "32"))
 
 REPO_DIR = '/repo' # Name of the directory mounted on the local machine
 ROOT_CACHE_DIR = os.path.join(REPO_DIR, 'cache/')
@@ -276,7 +272,10 @@ def generate_tiles_for_plane(plane):
     LOG.info(f"{log_prefix} Generating plane {plane}")
     LOG.info(f"{log_prefix} Loading images into memory")
 
+    old_image_location = os.path.join(GENERATED_FULL_IMAGES, f"current-map-image-{plane}.png")
     new_image_location = os.path.join(GENERATED_FULL_IMAGES, f"new-map-image-{plane}.png")
+
+    old_image = pyvips.Image.new_from_file(old_image_location)
     new_image = pyvips.Image.new_from_file(new_image_location)
 
     image_width = new_image.width
@@ -284,91 +283,28 @@ def generate_tiles_for_plane(plane):
 
     starting_zoom = int(math.sqrt(math.pow(2, math.ceil(math.log(image_width_tiles) / math.log(2)))))
 
-    if FORCE_FULL_REGEN:
-        LOG.info(f"{log_prefix} FORCE_FULL_REGEN enabled, regenerating all tiles in batches of {FULL_REGEN_BATCH_SIZE}")
-        changed_tiles = generate_tiles_for_plane_batched(plane, new_image, starting_zoom, log_prefix)
-    else:
-        old_image_location = os.path.join(GENERATED_FULL_IMAGES, f"current-map-image-{plane}.png")
-        old_image = pyvips.Image.new_from_file(old_image_location)
-
-        LOG.info(f"{log_prefix} Calculating changed tiles")
-        changed_tiles = get_changed_tiles(old_image, new_image, plane, starting_zoom)
-
-        LOG.info(f"{log_prefix} Storing diff image")
-        output_tile_diff_image(changed_tiles, new_image_location, str(Path(GENERATED_FULL_IMAGES, f"diff-map-image-{plane}.png")))
-
-        LOG.info(f"{log_prefix} Found {len(changed_tiles)} changed tiles at zoom level {starting_zoom}")
-
-        LOG.info(f"{log_prefix} Saving changed tiles at zoom level {starting_zoom}")
-        for tile in changed_tiles:
-            save_tile(tile["image"], plane, starting_zoom, tile["x"], tile["y"])
-
-        next_changed_tiles = changed_tiles
-        for zoom in range(starting_zoom + 1, MAX_ZOOM + 1):
-            LOG.info(f"{log_prefix} Splitting changed tiles from zoom level {zoom-1} to zoom level {zoom}")
-            next_changed_tiles = split_tiles_to_new_zoom(next_changed_tiles, plane, zoom)
-            LOG.info(f"{log_prefix} Done")
-
-        for zoom in reversed(range(MIN_ZOOM + 1, starting_zoom + 1)):
-            LOG.info(f"{log_prefix} Joining changed tiles from zoom level {zoom} to zoom level {zoom - 1}")
-            changed_tiles = join_tiles_to_new_zoom(changed_tiles, plane, zoom, zoom - 1)
-            LOG.info(f"{log_prefix} Done")
-
-
-def generate_tiles_for_plane_batched(plane, new_image, starting_zoom, log_prefix):
-    """
-    Regenerate every tile without loading the previous full-map image or holding
-  all zoom levels in memory at once. Processes starting-zoom tiles in batches.
-    """
-    new_image_location = os.path.join(GENERATED_FULL_IMAGES, f"new-map-image-{plane}.png")
-    all_tile_coords = build_all_tile_coords(new_image)
-    total_tiles = len(all_tile_coords)
-    total_batches = math.ceil(total_tiles / FULL_REGEN_BATCH_SIZE)
+    LOG.info(f"{log_prefix} Calculating changed tiles")
+    changed_tiles = get_changed_tiles(old_image, new_image, plane, starting_zoom)
 
     LOG.info(f"{log_prefix} Storing diff image")
-    output_tile_diff_image(all_tile_coords, new_image_location, str(Path(GENERATED_FULL_IMAGES, f"diff-map-image-{plane}.png")))
+    output_tile_diff_image(changed_tiles, new_image_location, str(Path(GENERATED_FULL_IMAGES, f"diff-map-image-{plane}.png")))
 
-    LOG.info(f"{log_prefix} Found {total_tiles} tiles at zoom level {starting_zoom}")
+    LOG.info(f"{log_prefix} Found {len(changed_tiles)} changed tiles at zoom level {starting_zoom}")
 
-    starting_zoom_tiles = []
+    LOG.info(f"{log_prefix} Saving changed tiles at zoom level {starting_zoom}")
+    for tile in changed_tiles:
+        save_tile(tile["image"], plane, starting_zoom, tile["x"], tile["y"])
 
-    for batch_index in range(total_batches):
-        batch_start = batch_index * FULL_REGEN_BATCH_SIZE
-        batch_coords = all_tile_coords[batch_start:batch_start + FULL_REGEN_BATCH_SIZE]
+    next_changed_tiles = changed_tiles
+    for zoom in range(starting_zoom + 1, MAX_ZOOM + 1):
+        LOG.info(f"{log_prefix} Splitting changed tiles from zoom level {zoom-1} to zoom level {zoom}")
+        next_changed_tiles = split_tiles_to_new_zoom(next_changed_tiles, plane, zoom)
+        LOG.info(f"{log_prefix} Done")
 
-        changed_tiles = []
-        for coord in batch_coords:
-            changed_tiles.append({
-                **coord,
-                "image": new_image.crop(coord["pixel_x"], coord["pixel_y"], TILE_SIZE_PX, TILE_SIZE_PX),
-            })
-
-        LOG.info(
-            f"{log_prefix} Saving batch {batch_index + 1}/{total_batches} "
-            f"({len(changed_tiles)} tiles) at zoom level {starting_zoom}"
-        )
-        for tile in changed_tiles:
-            save_tile(tile["image"], plane, starting_zoom, tile["x"], tile["y"])
-
-        next_changed_tiles = changed_tiles
-        for zoom in range(starting_zoom + 1, MAX_ZOOM + 1):
-            LOG.info(
-                f"{log_prefix} Splitting batch {batch_index + 1}/{total_batches} "
-                f"from zoom level {zoom - 1} to zoom level {zoom}"
-            )
-            next_changed_tiles = split_tiles_to_new_zoom(next_changed_tiles, plane, zoom)
-
-        starting_zoom_tiles.extend({"x": coord["x"], "y": coord["y"]} for coord in batch_coords)
-        del changed_tiles, next_changed_tiles
-        gc.collect()
-
-    changed_tiles = starting_zoom_tiles
     for zoom in reversed(range(MIN_ZOOM + 1, starting_zoom + 1)):
         LOG.info(f"{log_prefix} Joining changed tiles from zoom level {zoom} to zoom level {zoom - 1}")
         changed_tiles = join_tiles_to_new_zoom(changed_tiles, plane, zoom, zoom - 1)
         LOG.info(f"{log_prefix} Done")
-
-    return changed_tiles
 
 
 def get_changed_tiles(old_image, new_image, plane, zoom):
@@ -414,27 +350,6 @@ def get_changed_tiles(old_image, new_image, plane, zoom):
 
     return changed_tiles
 
-
-def build_all_tile_coords(new_image):
-    """
-    List every tile coordinate in the new map image without extracting pixels.
-    """
-    tile_coords = []
-    max_y = math.floor(new_image.height / TILE_SIZE_PX)
-
-    for tile_x in range(0, new_image.width, TILE_SIZE_PX):
-        for tile_y in range(0, new_image.height, TILE_SIZE_PX):
-            x = int(tile_x / TILE_SIZE_PX)
-            y = max_y - int(tile_y / TILE_SIZE_PX) - 1
-
-            tile_coords.append({
-                "pixel_x": tile_x,
-                "pixel_y": tile_y,
-                "x": x,
-                "y": y,
-            })
-
-    return tile_coords
 
 def has_tile_changed(plane, zoom, tile_x, tile_y, old_image, new_image):
     new_image_tile = new_image.crop(tile_x, tile_y, TILE_SIZE_PX, TILE_SIZE_PX)

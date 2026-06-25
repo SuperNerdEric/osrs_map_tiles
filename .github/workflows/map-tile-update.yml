@@ -4,11 +4,6 @@ on:
   schedule:
     - cron: '0 0,3,6,9,12,15,18,21 * * *' # Every 3 hours starting at 00:00 UTC
   workflow_dispatch:
-    inputs:
-      force_full_regen:
-        description: 'Regenerate all tiles (fixes corrupt tiles left by incremental updates)'
-        type: boolean
-        default: false
 
 jobs:
   generate-tiles:
@@ -54,10 +49,8 @@ jobs:
           echo "image=ghcr.io/${IMAGE_LOWER}:latest" >> $GITHUB_OUTPUT
 
       - name: Run tile generator in Docker
-        env:
-          FORCE_FULL_REGEN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_full_regen == 'true' }}
         run: |
-          docker run -e FORCE_FULL_REGEN="${FORCE_FULL_REGEN}" -v "${{ github.workspace }}:/repo" ${{ steps.pull.outputs.image }}
+          docker run -v "${{ github.workspace }}:/repo" ${{ steps.pull.outputs.image }}
 
       - name: Configure git
         run: |
@@ -90,4 +83,3 @@ jobs:
         with:
           name: disk-usage
           path: disk-usage.txt
-
