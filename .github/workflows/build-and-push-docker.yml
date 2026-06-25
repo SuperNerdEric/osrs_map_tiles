@@ -2,6 +2,17 @@ name: Build and Push Docker Image
 
 on:
   workflow_dispatch:
+  schedule:
+    # Rebuild weekly so the bundled RuneLite cache library stays current.
+    - cron: '0 6 * * 0'
+  push:
+    branches:
+      - master
+    paths:
+      - 'tile_generator/Dockerfile'
+      - 'tile_generator/requirements.txt'
+      - 'tile_generator/java/**'
+      - 'tile_generator/src/**'
 
 env:
   REGISTRY: ghcr.io
@@ -67,4 +78,3 @@ jobs:
           echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
           echo "or"
           echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
-
